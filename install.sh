@@ -1,228 +1,121 @@
 #!/bin/bash
 
-# Skript zur automatischen Installation eines abgesicherten Servers auf Raspberry Pi 5
-# Erstellt für NextcloudPi, Docker, Nginx Proxy Manager, Bitwarden, Floccus und Webserver
-
-# Farben für Ausgabe
+# Farben für die Ausgabe
 GREEN='\033[0;32m'
 RED='\033[0;31m'
 NC='\033[0m' # No Color
 
-echo -e "${GREEN}Willkommen beim Raspberry Pi 5 Setup-Skript!${NC}"
-echo "Dieses Skript richtet eine Docker-Umgebung, NextcloudPi, Bitwarden, Floccus und einen Webserver ein."
+# Funktion zum Prüfen, ob ein Befehl erfolgreich war
+check_success() {
+    if [ $? -ne 0 ]; then
+        echo -e "${RED}Fehler bei der Ausführung des letzten Befehls. Skript wird beendet.${NC}"
+        exit 1
+    fi
+}
 
-# Überprüfen, ob das Skript als Root ausgeführt wird
-if [ "$EUID" -ne 0 ]; then
-    echo -e "${RED}Bitte führe dieses Skript als Root aus (mit sudo).${NC}"
-    exit 1
+# --- System aktualisieren ---
+echo -e "${GREEN}Aktualisiere das System...${NC}"
+sudo apt update && sudo apt upgrade -y
+check_success
+
+# --- Notwendige Pakete installieren ---
+echo -e "${GREEN}Installiere notwendige Pakete...${NC}"
+sudo apt install -y curl wget git unzip jq
+check_success
+
+# --- Docker installieren ---
+echo -e "${GREEN}Installiere Docker...${NC}"
+curl -fsSL https://get.docker.com -o get-docker.sh
+sudo sh get-docker.sh
+check_success
+sudo usermod -aG docker $USER
+newgrp docker
+
+# --- Docker Compose installieren ---
+echo -e "${GREEN}Installiere Docker Compose...${NC}"
+sudo apt install -y docker-compose
+check_success
+
+# --- Verzeichnisse für Datenpersistenz erstellen ---
+echo -e "${GREEN}Erstelle Verzeichnisse für Datenpersistenz...${NC}"
+mkdir -p ~/docker/{proxy,webserver,mailserver}
+check_success
+
+# --- Eingabeaufforderungen für Konfigurationsdetails ---
+read -p "Gib deine Domain ein (z.B. meinefirma.dyndns.http.net): " DOMAIN
+read -p "Gib deine E-Mail-Adresse für Let's Encrypt ein: " EMAIL
+
+# --- Abfrage zur Deaktivierung von Bluetooth ---
+read -p "Soll Bluetooth deaktiviert werden? (y/n): " DISABLE_BT
+if [ "$DISABLE_BT" == "y" ]; then
+    echo -e "${GREEN}Deaktiviere Bluetooth...${NC}"
+    sudo systemctl disable bluetooth
+    sudo systemctl stop bluetooth
+    echo "dtoverlay=disable-bt" | sudo tee -a /boot/config.txt
+    echo -e "${GREEN}Bluetooth wurde deaktiviert. Ein Neustart ist erforderlich.${NC}"
 fi
 
-# System aktualisieren
-echo -e "${GREEN}Aktualisiere das System...${NC}"
-apt update && apt upgrade -y
+# --- Abfrage zur Deaktivierung von WLAN ---
+read -p "Soll WLAN deaktiviert werden? (y/n): " DISABLE_WIFI
+if [ "$DISABLE_WIFI" == "y" ]; then
+    echo -e "${GREEN}Deaktiviere WLAN...${NC}"
+    sudo iwconfig wlan0 down
+    sudo ip link set wlan0 down
+    echo "dtoverlay=disable-wifi" | sudo tee -a /boot/config.txt
+    echo -e "${GREEN}WLAN wurde deaktiviert. Ein Neustart ist erforderlich.${NC}"
+fi
 
-# Eingabeaufforderungen für benutzerdefinierte Konfigurationen
-read -p "Gib deine Haupt-Domain ein (z. B. example.com): " DOMAIN
-read -p "Gib deine E-Mail-Adresse für Let's Encrypt ein: " EMAIL
-read -p "Gib deinen HTTP.net DynDNS-Benutzernamen ein: " DYNDNS_USER
-read -p "Gib dein HTTP.net DynDNS-Passwort ein: " DYNDNS_PASS
-read -p "Gib den gewünschten Bitwarden-Admin-Token ein: " BW_ADMIN_TOKEN
+# --- NGINX Proxy Manager installieren ---
+echo -e "${GREEN}Installiere NGINX Proxy Manager...${NC}"
+docker run -d \
+  --name nginx-proxy-manager \
+  -p 80:80 \
+  -p 443:443 \
+  -p 81:81 \
+  -v ~/docker/proxy/data:/data \
+  -v ~/docker/proxy/letsencrypt:/etc/letsencrypt \
+  --restart=unless-stopped \
+  jlesage/nginx-proxy-manager
+check_success
 
-# 1. Docker und Nginx Proxy Manager installieren
-echo -e "${GREEN}Installiere Docker und Docker Compose...${NC}"
-apt install docker.io docker-compose -y
-systemctl enable docker
-systemctl start docker
+# Warte kurz, bis NGINX Proxy Manager gestartet ist
+sleep 10
 
-echo -e "${GREEN}Richte Nginx Proxy Manager ein...${NC}"
-mkdir -p /home/pi/nginx-proxy
-cat <<EOF > /home/pi/nginx-proxy/docker-compose.yml
-version: '3'
-services:
-  app:
-    image: 'jc21/nginx-proxy-manager:latest'
-    restart: unless-stopped
-    ports:
-      - '80:80'
-      - '443:443'
-      - '81:81'
-    environment:
-      DB_MYSQL_HOST: "db"
-      DB_MYSQL_PORT: 3306
-      DB_MYSQL_USER: "npm"
-      DB_MYSQL_PASSWORD: "npm_password"
-      DB_MYSQL_DATABASE: "npm"
-    volumes:
-      - ./data:/data
-      - ./letsencrypt:/etc/letsencrypt
-  db:
-    image: 'mariadb:latest'
-    restart: unless-stopped
-    environment:
-      MYSQL_ROOT_PASSWORD: "npm_root_password"
-      MYSQL_DATABASE: "npm"
-      MYSQL_USER: "npm"
-      MYSQL_PASSWORD: "npm_password"
-    volumes:
-      - ./mysql:/var/lib/mysql
-EOF
-cd /home/pi/nginx-proxy
-docker-compose up -d
+# --- NGINX Proxy Manager konfigurieren ---
+echo -e "${GREEN}Bitte öffne http://<RaspberryPi-IP>:81 im Browser und konfiguriere NGINX Proxy Manager.${NC}"
+echo -e "${GREEN}Standard-Login: admin@example.com / changeme${NC}"
+echo -e "${GREEN}Erstelle Proxy Hosts für alle Dienste mit SSL über Let's Encrypt.${NC}"
+echo -e "${GREEN}Beispiel für Subdomains: web.$DOMAIN -> Webserver, mail.$DOMAIN -> Mailserver${NC}"
+read -p "Drücke Enter, wenn du die Konfiguration abgeschlossen hast..."
 
-# Konfiguration von Let's Encrypt und Domains erfolgt später über die Nginx Proxy Manager UI
+# --- Webserver-Container installieren ---
+echo -e "${GREEN}Installiere Webserver-Container...${NC}"
+docker run -d \
+  --name webserver \
+  -p 3000:3000 \
+  -v ~/docker/webserver/data:/config \
+  --restart=unless-stopped \
+  linuxserver/webtop
+check_success
 
-# 2. NextcloudPi Installation und Festplatten-Einbindung
-echo -e "${GREEN}Installiere NextcloudPi in Docker...${NC}"
-mkdir -p /home/pi/nextcloudpi
+# --- Mailserver mit Roundcube installieren ---
+echo -e "${GREEN}Installiere Mailserver mit Roundcube...${NC}"
+docker run -d \
+  --name mailserver \
+  -p 25:25 \
+  -p 143:143 \
+  -p 587:587 \
+  -p 993:993 \
+  -v ~/docker/mailserver/data:/var/mail \
+  -v ~/docker/mailserver/config:/tmp/docker-mailserver \
+  --restart=unless-stopped \
+  mailserver/docker-mailserver
+check_success
 
-# Erkenne angeschlossene Festplatten
-echo -e "${GREEN}Suche nach angeschlossenen Festplatten...${NC}"
-DISKS=$(lsblk -o NAME,TYPE | grep disk | awk '{print $1}')
-MOUNT_POINTS=""
-for DISK in $DISKS; do
-    DISK_PATH="/dev/$DISK"
-    MOUNT_DIR="/mnt/$DISK"
-    mkdir -p "$MOUNT_DIR"
-    mkfs.ext4 -F "$DISK_PATH" || echo "Festplatte $DISK_PATH bereits formatiert"
-    mount "$DISK_PATH" "$MOUNT_DIR"
-    echo "$DISK_PATH $MOUNT_DIR ext4 defaults 0 0" >> /etc/fstab
-    MOUNT_POINTS="$MOUNT_POINTS -v $MOUNT_DIR:/data/$DISK"
-done
-
-cat <<EOF > /home/pi/nextcloudpi/docker-compose.yml
-version: '3'
-services:
-  nextcloudpi:
-    image: ownyourbits/nextcloudpi:latest
-    restart: unless-stopped
-    ports:
-      - "4443:4443"
-      - "8080:80"
-      - "8443:443"
-    volumes:
-      - /home/pi/nextcloudpi/data:/data
-      $MOUNT_POINTS
-    environment:
-      - TRUSTED_DOMAINS=cloud.$DOMAIN
-EOF
-cd /home/pi/nextcloudpi
-docker-compose up -d
-
-# 3. Nextcloud-Plugins installieren
-echo -e "${GREEN}Installiere empfohlene Nextcloud-Plugins...${NC}"
-docker exec -it nextcloudpi ncp-config <<EOF
-ncp-app install files_automatedtagging
-ncp-app install groupfolders
-ncp-app install tasks
-ncp-app install calendar
-ncp-app install contacts
-ncp-app install notes
-ncp-app install drawio
-ncp-app install documentserver_community
-EOF
-
-# 4. Webserver mit MySQL, PHP, FTP, WebDAV und Verwaltungsoberfläche
-echo -e "${GREEN}Richte Webserver mit Verwaltungsoberfläche ein...${NC}"
-mkdir -p /home/pi/webserver
-cat <<EOF > /home/pi/webserver/docker-compose.yml
-version: '3'
-services:
-  web:
-    image: litespeedtech/openlitespeed:latest
-    restart: unless-stopped
-    ports:
-      - "7080:7080" # Admin UI
-    volumes:
-      - /home/pi/webserver/html:/var/www/vhosts/localhost/html
-    environment:
-      - ADMIN_USER=admin
-      - ADMIN_PASSWORD=admin_password
-  mysql:
-    image: mariadb:latest
-    restart: unless-stopped
-    environment:
-      - MYSQL_ROOT_PASSWORD=root_password
-      - MYSQL_DATABASE=webdb
-      - MYSQL_USER=webuser
-      - MYSQL_PASSWORD=webpass
-    volumes:
-      - /home/pi/webserver/mysql:/var/lib/mysql
-EOF
-cd /home/pi/webserver
-docker-compose up -d
-
-# 5. Bitwarden Installation
-echo -e "${GREEN}Installiere Bitwarden (Vaultwarden)...${NC}"
-mkdir -p /home/pi/vaultwarden
-cat <<EOF > /home/pi/vaultwarden/docker-compose.yml
-version: '3'
-services:
-  vaultwarden:
-    image: vaultwarden/server:latest
-    restart: unless-stopped
-    ports:
-      - "8555:80"
-    volumes:
-      - /home/pi/vaultwarden/data:/data
-    environment:
-      - ADMIN_TOKEN=$BW_ADMIN_TOKEN
-      - DOMAIN=https://bitwarden.$DOMAIN
-EOF
-cd /home/pi/vaultwarden
-docker-compose up -d
-
-# 6. Floccus Installation
-echo -e "${GREEN}Installiere Floccus...${NC}"
-mkdir -p /home/pi/floccus
-cat <<EOF > /home/pi/floccus/docker-compose.yml
-version: '3'
-services:
-  floccus:
-    image: floccus/floccus:latest
-    restart: unless-stopped
-    ports:
-      - "8666:80"
-    volumes:
-      - /home/pi/floccus/data:/data
-EOF
-cd /home/pi/floccus
-docker-compose up -d
-
-# DynDNS Einrichtung für HTTP.net
-echo -e "${GREEN}Richte DynDNS mit HTTP.net ein...${NC}"
-apt install ddclient -y
-cat <<EOF > /etc/ddclient.conf
-daemon=300
-syslog=yes
-pid=/var/run/ddclient.pid
-protocol=dyndns2
-use=web, web=checkip.dyndns.org/, web-skip='Current IP Address: '
-server=dynupdate.http.net
-login=$DYNDNS_USER
-password=$DYNDNS_PASS
-$DOMAIN
-EOF
-systemctl restart ddclient
-
-# Sicherheitskonfiguration
-echo -e "${GREEN}Sichere das System ab...${NC}"
-apt install fail2ban ufw -y
-ufw allow 22
-ufw allow 80
-ufw allow 443
-ufw allow 4443
-ufw allow 7080
-ufw allow 8080
-ufw allow 8443
-ufw allow 8555
-ufw allow 8666
-ufw enable
-
-# Abschluss
+# --- Abschluss ---
 echo -e "${GREEN}Installation abgeschlossen!${NC}"
-echo "Nginx Proxy Manager: http://<Pi-IP>:81 (Domain- und Zertifikatskonfiguration)"
-echo "NextcloudPi: https://cloud.$DOMAIN:4443"
-echo "Webserver Admin: http://$DOMAIN:7080"
-echo "Bitwarden: http://bitwarden.$DOMAIN:8555"
-echo "Floccus: http://<Pi-IP>:8666"
-echo "Bitte konfiguriere Nginx Proxy Manager für SSL und Domains."
+echo -e "${GREEN}Bitte konfiguriere die Dienste über NGINX Proxy Manager und teste die Funktionalität:${NC}"
+echo -e "- Webserver: http://<RaspberryPi-IP>:3000 oder https://web.$DOMAIN (nach Konfiguration)"
+echo -e "- Mailserver mit Roundcube: Konfiguriere über https://mail.$DOMAIN (nach Setup)"
+echo -e "${GREEN}Hinweis: Für den Mailserver musst du die Konfiguration in ~/docker/mailserver/config anpassen.${NC}"
+echo -e "${GREEN}Für Subdomains: Nutze NGINX Proxy Manager, um Subdomains wie web.$DOMAIN oder mail.$DOMAIN zu routen.${NC}"
