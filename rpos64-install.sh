@@ -5,7 +5,7 @@ GREEN='\033[0;32m'
 RED='\033[0;31m'
 NC='\033[0m' # No Color
 
-# Funktion zum Prüfen, ob ein Befehl erfolgreich war
+# Funktion zum Überprüfen des Erfolgs eines Befehls
 check_success() {
     if [ $? -ne 0 ]; then
         echo -e "${RED}Fehler bei der Ausführung des letzten Befehls. Skript wird beendet.${NC}"
@@ -31,10 +31,17 @@ read -p "Gib deine E-Mail-Adresse für Let's Encrypt ein: " EMAIL
 read -p "Gib deinen DynDNS-Benutzernamen ein: " DYNDNS_USER
 read -s -p "Gib dein DynDNS-Passwort ein: " DYNDNS_PASS
 echo ""
-read -p "Gib das Gateway deines Netzwerks ein (z.B. 192.168.1.1): " GATEWAY
-read -p "Gib die DNS-Server ein (z.B. 192.168.1.1,8.8.8.8): " DNS_SERVERS
+read -p "Möchtest du Gateway und DNS manuell eingeben? (y/n): " SET_NETWORK_MANUALLY
+if [ "$SET_NETWORK_MANUALLY" == "y" ]; then
+    read -p "Gib das Gateway ein (z.B. 192.168.1.1): " GATEWAY
+    read -p "Gib die DNS-Server ein (z.B. 192.168.1.1,8.8.8.8): " DNS_SERVERS
+else
+    GATEWAY=$(ip route | grep default | awk '{print $3}')
+    DNS_SERVERS=$(cat /etc/resolv.conf | grep nameserver | awk '{print $2}' | paste -sd "," -)
+fi
 read -p "Soll Bluetooth deaktiviert werden? (y/n): " DISABLE_BT
 read -p "Soll WLAN deaktiviert werden? (y/n): " DISABLE_WIFI
+read -p "Verwendest du Raspberry Pi OS Desktop? (y/n): " USE_DESKTOP
 
 # --- System aktualisieren (benötigt sudo) ---
 echo -e "${GREEN}Aktualisiere das System...${NC}"
@@ -52,6 +59,7 @@ curl -fsSL https://get.docker.com -o get-docker.sh
 sudo sh get-docker.sh
 check_success
 sudo usermod -aG docker $USER
+echo -e "${GREEN}Hinweis: Bitte logge dich aus und wieder ein, um die Docker-Gruppenänderung zu aktivieren.${NC}"
 newgrp docker
 
 # --- Docker Compose installieren (benötigt sudo) ---
@@ -66,7 +74,7 @@ check_success
 
 # --- Docker-Netzwerk erstellen ---
 echo -e "${GREEN}Erstelle Docker-Netzwerk 'proxy_net'...${NC}"
-docker network create proxy_net
+sg docker -c "docker network create proxy_net"
 check_success
 
 # --- Skript für feste IP-Adresse erstellen ---
@@ -120,7 +128,7 @@ echo -e "${GREEN}Hinweis: Überprüfe die DynDNS-Konfiguration in /etc/ddclient.
 
 # --- NGINX Proxy Manager installieren ---
 echo -e "${GREEN}Installiere NGINX Proxy Manager...${NC}"
-docker run -d \
+sg docker -c "docker run -d \
   --name nginx-proxy-manager \
   --network proxy_net \
   -p 80:80 \
@@ -129,7 +137,7 @@ docker run -d \
   -v ~/docker/proxy/data:/data \
   -v ~/docker/proxy/letsencrypt:/etc/letsencrypt \
   --restart=unless-stopped \
-  jlesage/nginx-proxy-manager
+  jlesage/nginx-proxy-manager"
 check_success
 
 # Warte kurz, bis NGINX Proxy Manager gestartet ist
@@ -143,7 +151,7 @@ read -p "Drücke Enter, wenn du die Konfiguration abgeschlossen hast..."
 
 # --- CapRover installieren ---
 echo -e "${GREEN}Installiere CapRover...${NC}"
-docker run -d \
+sg docker -c "docker run -d \
   --name caprover \
   --network proxy_net \
   -p 3000:3000 \
@@ -151,12 +159,12 @@ docker run -d \
   -v /var/run/docker.sock:/var/run/docker.sock \
   -v ~/docker/caprover:/captain/data \
   --restart=unless-stopped \
-  caprover/caprover
+  caprover/caprover"
 check_success
 
 # --- Mailserver mit Roundcube installieren ---
 echo -e "${GREEN}Installiere Mailserver mit Roundcube...${NC}"
-docker run -d \
+sg docker -c "docker run -d \
   --name mailserver \
   --network proxy_net \
   -p 25:25 \
@@ -167,12 +175,12 @@ docker run -d \
   -v ~/docker/mailserver/data:/var/mail \
   -v ~/docker/mailserver/config:/tmp/docker-mailserver \
   --restart=unless-stopped \
-  mailserver/docker-mailserver
+  mailserver/docker-mailserver"
 check_success
 
 # --- NextcloudPi installieren ---
 echo -e "${GREEN}Installiere NextcloudPi...${NC}"
-docker run -d \
+sg docker -c "docker run -d \
   --name nextcloudpi \
   --network proxy_net \
   -p 8081:80 \
@@ -180,19 +188,86 @@ docker run -d \
   -p 4443:4443 \
   -v ~/docker/nextcloud:/data \
   --restart=unless-stopped \
-  ownyourbits/nextcloudpi-aarch64 $DOMAIN
+  ownyourbits/nextcloudpi-aarch64 $DOMAIN"
 check_success
 
 # --- Vaultwarden installieren ---
 echo -e "${GREEN}Installiere Vaultwarden...${NC}"
-docker run -d \
+sg docker -c "docker run -d \
   --name vaultwarden \
   --network proxy_net \
   -p 8082:80 \
   -v ~/docker/bitwarden:/data \
   --restart=unless-stopped \
-  vaultwarden/server
+  vaultwarden/server"
 check_success
+
+# --- Desktop-Sicherheitsskript ausführen, wenn Desktop-Modus bestätigt ---
+if [ "$USE_DESKTOP" == "y" ]; then
+    echo -e "${GREEN}Führe Desktop-Sicherheitskonfiguration aus...${NC}"
+    cat << 'EOF' > ~/desktop-security.sh
+#!/bin/bash
+
+GREEN='\033[0;32m'
+RED='\033[0;31m'
+NC='\033[0m'
+
+check_success() {
+    if [ $? -ne 0 ]; then
+        echo -e "${RED}Fehler bei der Ausführung. Skript wird beendet.${NC}"
+        exit 1
+    fi
+}
+
+echo -e "${GREEN}Aktualisiere das System mit Sicherheitsupdates...${NC}"
+sudo apt update && sudo apt upgrade -y
+check_success
+
+echo -e "${GREEN}Installiere und konfiguriere die Firewall (UFW)...${NC}"
+sudo apt install -y ufw
+check_success
+
+sudo ufw default deny incoming
+sudo ufw default allow outgoing
+
+echo -e "${GREEN}Öffne erforderliche Ports für Cloud-Dienste...${NC}"
+sudo ufw allow 80/tcp
+sudo ufw allow 443/tcp
+sudo ufw allow 81/tcp
+sudo ufw allow 3000/tcp
+sudo ufw allow 8080/tcp
+sudo ufw allow 25/tcp
+sudo ufw allow 143/tcp
+sudo ufw allow 587/tcp
+sudo ufw allow 993/tcp
+sudo ufw allow 8083/tcp
+sudo ufw allow 8081/tcp
+sudo ufw allow 8443/tcp
+sudo ufw allow 4443/tcp
+sudo ufw allow 8082/tcp
+
+sudo ufw enable
+check_success
+
+echo -e "${GREEN}Deaktiviere SSH-Dienst...${NC}"
+sudo systemctl stop ssh
+sudo systemctl disable ssh
+check_success
+
+echo -e "${GREEN}Deaktiviere IPv6...${NC}"
+echo "net.ipv6.conf.all.disable_ipv6 = 1" | sudo tee -a /etc/sysctl.conf
+echo "net.ipv6.conf.default.disable_ipv6 = 1" | sudo tee -a /etc/sysctl.conf
+sudo sysctl -p
+check_success
+
+echo -e "${GREEN}Sicherheitskonfiguration abgeschlossen!${NC}"
+echo -e "${GREEN}Bitte starte das System neu mit 'sudo reboot', um alle Änderungen zu übernehmen.${NC}"
+EOF
+
+    chmod +x ~/desktop-security.sh
+    bash ~/desktop-security.sh
+    rm ~/desktop-security.sh
+fi
 
 # --- Abschluss ---
 echo -e "${GREEN}Installation abgeschlossen!${NC}"
